@@ -55,6 +55,9 @@ jobs:
         run: |
           swiftc -swift-version 6 Scripts/ru_picker_layout_probe.swift Sources/CodexBar/CostHistoryMetricPicker.swift -o "$RUNNER_TEMP/ru-picker-probe"
           "$RUNNER_TEMP/ru-picker-probe"
+      - name: Owned agent fixture compatibility preflight
+        working-directory: upstream
+        run: python3 Scripts/ru_agent_fixture_preflight.py
       - name: Updater synthetic checks
         working-directory: upstream
         run: python3 Scripts/ru_channel_tests.py
