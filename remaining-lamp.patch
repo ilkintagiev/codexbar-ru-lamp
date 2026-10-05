@@ -1,3 +1,415 @@
+diff --git a/Scripts/ru_channel_tests.py b/Scripts/ru_channel_tests.py
+new file mode 100644
+index 0000000..9182edc
+--- /dev/null
++++ b/Scripts/ru_channel_tests.py
+@@ -0,0 +1,63 @@
++import importlib.util,tempfile,unittest,zipfile
++from pathlib import Path
++from unittest.mock import patch
++s=importlib.util.spec_from_file_location('u',Path(__file__).parents[1]/'Sources/CodexBar/Resources/cloud_update.py');u=importlib.util.module_from_spec(s);s.loader.exec_module(u)
++class Tests(unittest.TestCase):
++ def fixture(self):
++  manifest=dict(repository=u.REPO,platform='arm64',recipeSHA='a'*40,archiveSHA256='b'*64,upstreamTag='v0.72.0',upstreamCommit='c'*40)
++  run=dict(conclusion='success',status='completed',head_sha='a'*40,head_repository=dict(full_name=u.REPO),path='.github/workflows/build.yml')
++  jobs={'jobs':[{'conclusion':'success','steps':[dict(name=n,conclusion='success') for n in u.REQUIRED]}]}
++  return manifest,run,jobs
++ def test_manifest_gates(self):
++  a,b,c=self.fixture();u.validate_manifest(a,b,c)
++  b['conclusion']='failure'
++  with self.assertRaises(ValueError):u.validate_manifest(a,b,c)
++  a,b,c=self.fixture();c['jobs'][0]['steps'][1]['conclusion']='skipped'
++  with self.assertRaises(ValueError):u.validate_manifest(a,b,c)
++ def test_same_recipe_new_upstream_is_new_build(self):
++  a,_,_=self.fixture();b=dict(a,upstreamCommit='d'*40,upstreamTag='v0.73.0')
++  self.assertNotEqual(u.build_identity(a),u.build_identity(b))
++ def test_interrupted_rename_retains_good_copy(self):
++  with tempfile.TemporaryDirectory() as d:
++   root=Path(d);app=root/'CodexBar.app';rollback=root/'CodexBar.rollback.app';backup=root/'CodexBar.previous.app'
++   backup.mkdir();(backup/'good').write_text('previous')
++   u.recover_interrupted(app,rollback,backup)
++   self.assertEqual((app/'good').read_text(),'previous')
++   rollback.mkdir();(rollback/'good').write_text('interrupted')
++   with self.assertRaises(RuntimeError):u.recover_interrupted(app,rollback,backup)
++   self.assertTrue(app.exists());self.assertTrue(rollback.exists())
++ def test_failed_new_start_restores_previous_and_restarts(self):
++  with tempfile.TemporaryDirectory() as d:
++   root=Path(d);app=root/'CodexBar.app';candidate=root/'candidate'
++   app.mkdir();(app/'identity').write_text('old');candidate.mkdir();(candidate/'identity').write_text('new')
++   calls=[]
++   def command(args,timeout=60):calls.append(args);return b''
++   with patch.object(u,'APP',app),patch.object(u,'command',command),patch.object(u,'job_process',side_effect=[10,None,None]),patch.object(u,'wait_stopped'),patch.object(u,'verify_new_process',side_effect=RuntimeError('new process failed')),patch.object(u.time,'sleep'):
++    with self.assertRaises(RuntimeError):u.replace_app(candidate)
++   self.assertEqual((app/'identity').read_text(),'old')
++   self.assertEqual(sum('kickstart' in c for c in calls),2)
++   self.assertFalse(app.with_name('CodexBar.rollback.app').exists())
++ def test_interruption_restores_rollback_before_rotation(self):
++  with tempfile.TemporaryDirectory() as d:
++   root=Path(d);app=root/'CodexBar.app';rollback=root/'CodexBar.rollback.app';backup=root/'CodexBar.previous.app'
++   rollback.mkdir();(rollback/'identity').write_text('current-good');backup.mkdir();(backup/'identity').write_text('older-good')
++   u.recover_interrupted(app,rollback,backup)
++   self.assertEqual((app/'identity').read_text(),'current-good')
++   self.assertEqual((backup/'identity').read_text(),'older-good')
++ def test_old_process_never_exits_bundle_is_retained(self):
++  with tempfile.TemporaryDirectory() as d:
++   app=Path(d)/'CodexBar.app';candidate=Path(d)/'candidate';app.mkdir();candidate.mkdir();(app/'identity').write_text('old')
++   with patch.object(u,'APP',app),patch.object(u,'command',return_value=b''),patch.object(u,'job_process',return_value=10),patch.object(u,'wait_stopped',side_effect=TimeoutError('still running')):
++    with self.assertRaises(TimeoutError):u.replace_app(candidate)
++   self.assertEqual((app/'identity').read_text(),'old')
++ def test_old_pid_is_not_new_build_health(self):
++  with patch.object(u,'job_process',return_value=10):
++   with self.assertRaises(RuntimeError):u.verify_new_process(10)
++ def test_zip_rejects_escape(self):
++  with tempfile.TemporaryDirectory() as d:
++   p=Path(d)/'archive.zip'
++   with zipfile.ZipFile(p,'w') as z:z.writestr('CodexBar.app/Contents/Info.plist','fixture')
++   u.validate_zip(p)
++   with zipfile.ZipFile(p,'w') as z:z.writestr('../escape','bad')
++   with self.assertRaises(ValueError):u.validate_zip(p)
++if __name__=='__main__':unittest.main()
+diff --git a/Scripts/ru_manifest.py b/Scripts/ru_manifest.py
+new file mode 100644
+index 0000000..f8ed1cf
+--- /dev/null
++++ b/Scripts/ru_manifest.py
+@@ -0,0 +1,11 @@
++#!/usr/bin/env python3
++import argparse, hashlib, json, re
++from pathlib import Path
++p=argparse.ArgumentParser();p.add_argument('--upstream-tag',required=True);p.add_argument('--upstream-commit',required=True);p.add_argument('--recipe-sha',required=True);p.add_argument('--run-id',required=True,type=int);p.add_argument('--resources',required=True);p.add_argument('--archive');p.add_argument('--channel-enabled',action='store_true');a=p.parse_args()
++if not re.fullmatch(r'v\d+\.\d+\.\d+',a.upstream_tag) or any(not re.fullmatch('[a-f0-9]{40}',v) for v in [a.upstream_commit,a.recipe_sha]) or a.run_id<=0:raise SystemExit('invalid build identity')
++manifest=dict(repository='ilkintagiev/codexbar-ru-lamp',platform='arm64',upstreamTag=a.upstream_tag,upstreamCommit=a.upstream_commit,recipeSHA=a.recipe_sha,runID=a.run_id,channelEnabled=a.channel_enabled)
++if a.archive:
++ manifest['archiveSHA256']=hashlib.sha256(Path(a.archive).read_bytes()).hexdigest()
++ Path('build-manifest.json').write_text(json.dumps(manifest,sort_keys=True))
++else:
++ resources=Path(a.resources);resources.mkdir(parents=True,exist_ok=True);(resources/'ru-build.json').write_text(json.dumps(manifest,sort_keys=True))
+diff --git a/Sources/CodexBar/CodexbarApp.swift b/Sources/CodexBar/CodexbarApp.swift
+index 2ac82fb..8266aea 100644
+--- a/Sources/CodexBar/CodexbarApp.swift
++++ b/Sources/CodexBar/CodexbarApp.swift
+@@ -343,6 +343,9 @@ private func isDeveloperIDSigned(bundleURL: URL) -> Bool {
+ @MainActor
+ private func makeUpdaterController() -> UpdaterProviding {
+     let bundleURL = Bundle.main.bundleURL
++    if Bundle.main.url(forResource: "ru-build", withExtension: "json") != nil {
++        return GuardedRUUpdater()
++    }
+     guard bundleURL.pathExtension == "app" else {
+         return DisabledUpdaterController(unavailableReason: "Updates unavailable in this build.")
+     }
+diff --git a/Sources/CodexBar/GuardedRUUpdater.swift b/Sources/CodexBar/GuardedRUUpdater.swift
+new file mode 100644
+index 0000000..4c1e9f2
+--- /dev/null
++++ b/Sources/CodexBar/GuardedRUUpdater.swift
+@@ -0,0 +1,124 @@
++import AppKit
++import Foundation
++
++@MainActor
++final class GuardedRUUpdater: UpdaterProviding {
++    var automaticallyChecksForUpdates: Bool {
++        get { UserDefaults.standard.object(forKey: "autoUpdateEnabled") as? Bool ?? true }
++        set { UserDefaults.standard.set(newValue, forKey: "autoUpdateEnabled") }
++    }
++
++    var automaticallyDownloadsUpdates: Bool {
++        get { self.automaticallyChecksForUpdates }
++        set { self.automaticallyChecksForUpdates = newValue }
++    }
++
++    var isAvailable: Bool {
++        guard let path = Bundle.main.url(forResource: "ru-build", withExtension: "json"),
++              let data = try? Data(contentsOf: path),
++              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
++        return value["channelEnabled"] as? Bool == true
++    }
++
++    var unavailableReason: String? {
++        guard self.isAvailable else { return "Канал кастомных обновлений подготовлен, но ещё не включён." }
++        let path = FileManager.default.homeDirectoryForCurrentUser
++            .appendingPathComponent("Library/Caches/local.mark.codexbar-ru-updater/update-status.json")
++        guard let data = try? Data(contentsOf: path),
++              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
++              value["state"] as? String == "unavailable" else { return nil }
++        return "Новое обновление недоступно: проверка или сборка не прошла. Текущая версия сохранена."
++    }
++
++    let updateStatus = UpdateStatus()
++    private var timer: Timer?
++    private var process: Process?
++
++    init() {
++        self.timer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
++            Task { @MainActor in self?.automaticCheck() }
++        }
++        Task { @MainActor [weak self] in
++            try? await Task.sleep(for: .seconds(60))
++            self?.automaticCheck()
++        }
++    }
++
++    private func automaticCheck() {
++        guard self.isAvailable, self.automaticallyChecksForUpdates else { return }
++        let last = UserDefaults.standard.double(forKey: "ruLastUpdateCheck")
++        guard Date().timeIntervalSince1970 - last >= 86400 else { return }
++        self.run(manual: false)
++    }
++
++    func checkForUpdates(_ sender: Any?) { self.run(manual: true) }
++    func installUpdate() { self.run(manual: true) }
++
++    private func run(manual: Bool) {
++        guard self.isAvailable, self.process == nil,
++              let script = Bundle.main.url(forResource: "cloud_update", withExtension: "py") else { return }
++        let process = Process()
++        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
++        process.arguments = ["kickstart", "gui/\(getuid())/local.mark.codexbar-ru-updater"]
++        _ = script
++        let cache = FileManager.default.homeDirectoryForCurrentUser
++            .appendingPathComponent("Library/Caches/local.mark.codexbar-ru-updater")
++        do {
++            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
++            let request: [String: Any] = ["manual": manual, "requestedAt": Date().timeIntervalSince1970]
++            let data = try JSONSerialization.data(withJSONObject: request)
++            try data.write(to: cache.appendingPathComponent("update-request.json"), options: .atomic)
++        } catch { return }
++        process.standardOutput = FileHandle.nullDevice
++        process.standardError = FileHandle.nullDevice
++        let requestedAt = Date().timeIntervalSince1970
++        process.terminationHandler = { [weak self] completed in
++            let started = completed.terminationStatus == 0
++            Task { @MainActor in
++                guard manual else {
++                    self?.process = nil
++                    return
++                }
++                var code: Int32 = 1
++                if started {
++                    let deadline = Date().addingTimeInterval(660)
++                    while Date() < deadline {
++                        try? await Task.sleep(for: .seconds(2))
++                        let path = FileManager.default.homeDirectoryForCurrentUser
++                            .appendingPathComponent("Library/Caches/local.mark.codexbar-ru-updater/update-status.json")
++                        if let data = try? Data(contentsOf: path),
++                           let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
++                           let checked = value["checkedAt"] as? Double,
++                           checked >= requestedAt,
++                           let state = value["state"] as? String,
++                           ["current", "updated", "unavailable"].contains(state)
++                        {
++                            code = state == "unavailable" ? 1 : 0
++                            break
++                        }
++                    }
++                }
++                self?.process = nil
++                if manual {
++                    let alert = NSAlert()
++                    alert.messageText = code == 0 ? "Проверка обновлений завершена" : "Обновление недоступно"
++                    alert.informativeText = code == 0
++                        ? "Рабочая версия сохранена. Новая стабильная версия устанавливается только после сборки и проверок."
++                        : "Текущая версия продолжает работать. Сведения: ~/Library/Caches/local.mark.codexbar-ru-updater/update-status.json."
++                    alert.runModal()
++                }
++            }
++        }
++        do {
++            try process.run()
++            self.process = process
++            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "ruLastUpdateCheck")
++        } catch {
++            if manual {
++                let alert = NSAlert()
++                alert.messageText = "Не удалось запустить проверку обновления"
++                alert.runModal()
++            }
++        }
++    }
++}
+diff --git a/Sources/CodexBar/Resources/cloud_update.py b/Sources/CodexBar/Resources/cloud_update.py
+new file mode 100644
+index 0000000..9952501
+--- /dev/null
++++ b/Sources/CodexBar/Resources/cloud_update.py
+@@ -0,0 +1,176 @@
++#!/usr/bin/env python3
++"""Prepared public-release updater. Inactive until CI release publication is approved."""
++import fcntl, hashlib, json, os, re, shutil, subprocess, sys, time, zipfile
++from pathlib import Path, PurePosixPath
++
++REPO='ilkintagiev/codexbar-ru-lamp'
++CACHE=Path.home()/'Library/Caches/local.mark.codexbar-ru-updater'
++APP=Path.home()/'Applications/CodexBar.app'
++JOB=f'gui/{os.getuid()}/local.mark.codexbar-ru'
++REQUIRED=['Required source checks','Required tests','Package app']
++DEADLINE=time.monotonic()+600
++
++def command(args,timeout=60):
++    remaining=DEADLINE-time.monotonic()
++    if remaining<=0:raise TimeoutError('update deadline')
++    return subprocess.run(args,capture_output=True,check=True,timeout=min(timeout,remaining)).stdout
++
++def fetch(url,out=None):
++    if not url.startswith(('https://api.github.com/repos/'+REPO+'/', 'https://github.com/'+REPO+'/releases/download/', 'https://api.github.com/repos/steipete/CodexBar/git/')):
++        raise ValueError('non-owned endpoint')
++    args=['/usr/bin/curl','--fail','--location','--silent','--show-error','--proto','=https','--proto-redir','=https','--max-time','60',url]
++    if out: args+=['--output',str(out)]
++    return command(args,timeout=65)
++
++def report(state,**values):
++    CACHE.mkdir(parents=True,exist_ok=True)
++    target=CACHE/'update-status.json';tmp=target.with_suffix('.tmp')
++    tmp.write_text(json.dumps(dict(state=state,checkedAt=time.time(),**values)));tmp.replace(target)
++
++def validate_manifest(manifest,run,jobs):
++    if manifest.get('repository')!=REPO or manifest.get('platform')!='arm64':raise ValueError('manifest scope')
++    if not re.fullmatch(r'v\d+\.\d+\.\d+',manifest.get('upstreamTag','')):raise ValueError('stable upstream tag')
++    if not re.fullmatch('[a-f0-9]{40}',manifest.get('upstreamCommit','')):raise ValueError('upstream commit')
++    sha=manifest.get('recipeSHA','')
++    if not re.fullmatch('[a-f0-9]{40}',sha):raise ValueError('recipe SHA')
++    if run.get('conclusion')!='success' or run.get('status')!='completed' or run.get('head_sha')!=sha:raise ValueError('run not successful')
++    if run.get('head_repository',{}).get('full_name')!=REPO:raise ValueError('run repository')
++    if run.get('path')!='.github/workflows/build.yml':raise ValueError('unexpected workflow')
++    qualified=False
++    for job in jobs.get('jobs',[]):
++        steps=job.get('steps',[])
++        if job.get('conclusion')=='success' and all(any(s.get('name')==name and s.get('conclusion')=='success' for s in steps) for name in REQUIRED):qualified=True
++    if not qualified:raise ValueError('required gates absent from successful packaging job')
++    if not re.fullmatch('[a-f0-9]{64}',manifest.get('archiveSHA256','')):raise ValueError('archive hash')
++
++def validate_zip(path):
++    with zipfile.ZipFile(path) as archive:
++        if sum(i.file_size for i in archive.infolist())>1500*1024*1024:raise ValueError('archive size')
++        for entry in archive.infolist():
++            name=PurePosixPath(entry.filename)
++            if name.is_absolute() or '..' in name.parts or not name.parts or name.parts[0]!='CodexBar.app':raise ValueError('archive path')
++            if (entry.external_attr>>16)&0o170000==0o120000:
++                target=PurePosixPath(archive.read(entry).decode())
++                if target.is_absolute():raise ValueError('absolute symlink')
++                resolved=list(name.parent.parts)
++                for part in target.parts:
++                    if part=='..':
++                        if len(resolved)<=1:raise ValueError('escaping symlink')
++                        resolved.pop()
++                    elif part!='.':resolved.append(part)
++
++def job_process():
++    remaining=DEADLINE-time.monotonic()
++    if remaining<=0:raise TimeoutError('update deadline')
++    p=subprocess.run(['/bin/launchctl','print',JOB],capture_output=True,timeout=min(5,remaining))
++    if p.returncode or b'state = running' not in p.stdout:return None
++    text=p.stdout.decode(errors='replace')
++    pid=re.search(r'^\s*pid = (\d+)\s*$',text,re.M)
++    program=re.search(r'^\s*program = (.+)\s*$',text,re.M)
++    if not pid or not program:raise RuntimeError('missing own job identity')
++    if program.group(1)!=str(APP/'Contents/MacOS/CodexBar'):raise RuntimeError('unexpected own job program')
++    return int(pid.group(1))
++
++def wait_stopped():
++    end=min(DEADLINE,time.monotonic()+15)
++    while time.monotonic()<end:
++        if job_process() is None:return
++        time.sleep(.2)
++    raise TimeoutError('own app did not exit; app bundle retained')
++
++def verify_new_process(old_pid):
++    pid=job_process()
++    if pid is None or pid==old_pid:raise RuntimeError('new own app process was not launched')
++    time.sleep(4)
++    if job_process()!=pid:raise RuntimeError('new own app did not remain healthy')
++
++def build_identity(manifest):
++    values=tuple(manifest.get(k) for k in ['upstreamTag','upstreamCommit','recipeSHA'])
++    if not re.fullmatch(r'v\d+\.\d+\.\d+',str(values[0])) or any(not re.fullmatch('[a-f0-9]{40}',str(v)) for v in values[1:]):raise ValueError('incomplete build identity')
++    return values
++
++def recover_interrupted(app,rollback,backup):
++    if app.exists():
++        if rollback.exists():raise RuntimeError('unresolved previous installation; retain every copy')
++        return
++    # Never delete the only previous-good copy after an interrupted rename.
++    source=rollback if rollback.exists() else backup
++    if not source.exists():raise FileNotFoundError('no current or previous-good app')
++    source.rename(app)
++
++def replace_app(candidate):
++    # Invoked from an independent one-shot updater LaunchAgent, never from the app's job.
++    nextapp=APP.with_name('CodexBar.next.app');backup=APP.with_name('CodexBar.previous.app');rollback=APP.with_name('CodexBar.rollback.app')
++    recover_interrupted(APP,rollback,backup)
++    if nextapp.exists():shutil.rmtree(nextapp)
++    shutil.copytree(candidate,nextapp,symlinks=True)
++    command(['/usr/bin/codesign','--verify','--deep','--strict',str(nextapp)])
++    old_pid=job_process();was_running=old_pid is not None;stopped=False;moved=False
++    if DEADLINE-time.monotonic()<60:raise TimeoutError('insufficient safe swap interval')
++    try:
++        if was_running:
++            command(['/bin/launchctl','kill','SIGTERM',JOB],timeout=15);stopped=True;wait_stopped()
++        APP.rename(rollback);moved=True;nextapp.rename(APP)
++        if was_running:
++            command(['/bin/launchctl','kickstart',JOB],timeout=15);verify_new_process(old_pid)
++        # New app verified; old current is still safely in rollback before rotating older backup.
++        if backup.exists():shutil.rmtree(backup)
++        rollback.rename(backup)
++    except Exception:
++        if moved:
++            if job_process() is not None:
++                command(['/bin/launchctl','kill','SIGTERM',JOB],timeout=15);wait_stopped()
++            if APP.exists():shutil.rmtree(APP)
++            rollback.rename(APP)
++        if stopped:command(['/bin/launchctl','kickstart',JOB],timeout=15)
++        raise
++
++def main():
++    CACHE.mkdir(parents=True,exist_ok=True)
++    with (CACHE/'update.lock').open('w') as lock:
++        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
++        except BlockingIOError:return
++        request_path=CACHE/'update-request.json'
++        request=json.loads(request_path.read_text()) if request_path.exists() else {}
++        manual=request.get('manual') is True and 0<=time.time()-request.get('requestedAt',0)<=660
++        setting=subprocess.run(['/usr/bin/defaults','read','com.steipete.codexbar','autoUpdateEnabled'],capture_output=True,timeout=5)
++        if not manual and setting.returncode==0 and setting.stdout.strip() in (b'0',b'false'):return
++        if request_path.exists():request_path.unlink()
++        recent=json.loads(fetch('https://api.github.com/repos/'+REPO+'/actions/workflows/build.yml/runs?per_page=1')).get('workflow_runs',[])
++        if recent and recent[0].get('status')=='completed' and recent[0].get('conclusion') in ['failure','cancelled','timed_out']:
++            report('unavailable',reason='remoteBuildFailed');return
++        release=json.loads(fetch('https://api.github.com/repos/'+REPO+'/releases/latest'))
++        if release.get('draft') or release.get('prerelease'):raise ValueError('unstable release')
++        assets={a['name']:a['browser_download_url'] for a in release.get('assets',[])}
++        manifest=json.loads(fetch(assets['build-manifest.json']))
++        run_id=manifest.get('runID')
++        if type(run_id) is not int or run_id<=0:raise ValueError('run ID')
++        run=json.loads(fetch(f'https://api.github.com/repos/{REPO}/actions/runs/{run_id}'))
++        jobs=json.loads(fetch(f'https://api.github.com/repos/{REPO}/actions/runs/{run_id}/jobs'))
++        validate_manifest(manifest,run,jobs)
++        # Resolve public official stable tag, including annotated tags, to the exact build source.
++        source=json.loads(fetch('https://api.github.com/repos/steipete/CodexBar/git/ref/tags/'+manifest['upstreamTag']))['object']
++        for _ in range(4):
++            if source.get('type')=='commit':break
++            if source.get('type')!='tag' or not re.fullmatch('[a-f0-9]{40}',source.get('sha','')):raise ValueError('upstream tag object')
++            source=json.loads(fetch('https://api.github.com/repos/steipete/CodexBar/git/tags/'+source['sha']))['object']
++        if source.get('type')!='commit' or source.get('sha')!=manifest['upstreamCommit']:raise ValueError('upstream stable source mismatch')
++        current=APP/'Contents/Resources/ru-build.json'
++        if current.exists() and build_identity(json.loads(current.read_text()))==build_identity(manifest):
++            report('current',tag=release['tag_name']);return
++        archive=CACHE/'candidate.zip';fetch(assets['CodexBar-RU-lamp.zip'],archive)
++        if hashlib.sha256(archive.read_bytes()).hexdigest()!=manifest['archiveSHA256']:raise ValueError('hash mismatch')
++        validate_zip(archive)
++        stage=CACHE/'stage'
++        if stage.exists():shutil.rmtree(stage)
++        stage.mkdir();command(['/usr/bin/ditto','-xk',str(archive),str(stage)])
++        candidate=stage/'CodexBar.app'
++        embedded=json.loads((candidate/'Contents/Resources/ru-build.json').read_text())
++        if build_identity(embedded)!=build_identity(manifest) or any(embedded.get(k)!=manifest.get(k) for k in ['repository','platform','runID']):raise ValueError('embedded manifest mismatch')
++        replace_app(candidate);report('updated',tag=release['tag_name'])
++
++if __name__=='__main__':
++    try:main()
++    except Exception as error:
++        report('unavailable',reason=type(error).__name__)
++        sys.exit(1)
 diff --git a/Sources/CodexBar/StatusItemController+Animation.swift b/Sources/CodexBar/StatusItemController+Animation.swift
 index ba9dce7..c9588b9 100644
 --- a/Sources/CodexBar/StatusItemController+Animation.swift
