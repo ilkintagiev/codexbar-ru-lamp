@@ -46,6 +46,10 @@ jobs:
           git apply --check ../custom/remaining-lamp.patch
           git apply ../custom/remaining-lamp.patch
           swift --version
+          python3 Scripts/ru_manifest.py --upstream-tag v0.72.0 --upstream-commit cfee869f3181379dd074adb9feeb5f19a994356a --recipe-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --resources Sources/CodexBar/Resources
+      - name: Updater synthetic checks
+        working-directory: upstream
+        run: python3 Scripts/ru_channel_tests.py
       - name: Required source checks
         working-directory: upstream
         run: make check
@@ -59,10 +63,12 @@ jobs:
           codesign --verify --deep --strict CodexBar.app
           ditto -c -k --keepParent CodexBar.app CodexBar-RU-lamp.zip
           shasum -a 256 CodexBar-RU-lamp.zip > CodexBar-RU-lamp.zip.sha256
+          python3 Scripts/ru_manifest.py --upstream-tag v0.72.0 --upstream-commit cfee869f3181379dd074adb9feeb5f19a994356a --recipe-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --resources Sources/CodexBar/Resources --archive CodexBar-RU-lamp.zip
       - uses: actions/upload-artifact@v4
         with:
           name: CodexBar-RU-lamp-v0.72.0
           path: |
             upstream/CodexBar-RU-lamp.zip
             upstream/CodexBar-RU-lamp.zip.sha256
+            upstream/build-manifest.json
           retention-days: 14
