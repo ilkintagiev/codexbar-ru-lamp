@@ -1,0 +1,68 @@
+name: CodexBar RU lamp
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    env:
+      CODEXBAR_SIGNING: adhoc
+      ARCHS: arm64
+      CODEXBAR_SUPPRESS_TEST_KEYCHAIN_ACCESS: '1'
+      CODEXBAR_TEST_RETRY_NON_TIMEOUT_FAILURES: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: custom
+      - uses: actions/checkout@v4
+        with:
+          repository: steipete/CodexBar
+          ref: cfee869f3181379dd074adb9feeb5f19a994356a
+          path: upstream
+      - name: Select compatible runner Xcode without changing global settings
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import os, pathlib, re, subprocess
+          candidates = []
+          for app in pathlib.Path('/Applications').glob('Xcode*.app'):
+              developer = app / 'Contents/Developer'
+              env = dict(os.environ, DEVELOPER_DIR=str(developer))
+              output = subprocess.run(['xcrun', 'swift', '--version'], env=env, capture_output=True, text=True)
+              match = re.search(r'Swift version (\d+)\.(\d+)', output.stdout)
+              if output.returncode == 0 and match and tuple(map(int, match.groups())) >= (6, 2):
+                  candidates.append((tuple(map(int, match.groups())), str(developer)))
+          if not candidates:
+              raise SystemExit('Runner has no compatible official Xcode Swift6.2+; no artifact is installed')
+          selected = max(candidates)[1]
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('DEVELOPER_DIR=' + selected + '\n')
+          PYCODE
+      - name: Apply public remaining lamp patch
+        working-directory: upstream
+        run: |
+          git apply --check ../custom/remaining-lamp.patch
+          git apply ../custom/remaining-lamp.patch
+          swift --version
+      - name: Required source checks
+        working-directory: upstream
+        run: make check
+      - name: Required tests
+        working-directory: upstream
+        run: make test
+      - name: Package app
+        working-directory: upstream
+        run: |
+          bash Scripts/package_app.sh release
+          codesign --verify --deep --strict CodexBar.app
+          ditto -c -k --keepParent CodexBar.app CodexBar-RU-lamp.zip
+          shasum -a 256 CodexBar-RU-lamp.zip > CodexBar-RU-lamp.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodexBar-RU-lamp-v0.72.0
+          path: |
+            upstream/CodexBar-RU-lamp.zip
+            upstream/CodexBar-RU-lamp.zip.sha256
+          retention-days: 14
