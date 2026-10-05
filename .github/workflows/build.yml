@@ -47,6 +47,9 @@ jobs:
           git apply ../custom/remaining-lamp.patch
           swift --version
           python3 Scripts/ru_manifest.py --upstream-tag v0.72.0 --upstream-commit cfee869f3181379dd074adb9feeb5f19a994356a --recipe-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --resources Sources/CodexBar/Resources
+      - name: Foundation compatibility preflight
+        working-directory: upstream
+        run: python3 Scripts/ru_path_preflight.py
       - name: Updater synthetic checks
         working-directory: upstream
         run: python3 Scripts/ru_channel_tests.py
