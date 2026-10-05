@@ -1,0 +1,123 @@
+diff --git a/Sources/CodexBar/StatusItemController+Animation.swift b/Sources/CodexBar/StatusItemController+Animation.swift
+index ba9dce7..ac3da02 100644
+--- a/Sources/CodexBar/StatusItemController+Animation.swift
++++ b/Sources/CodexBar/StatusItemController+Animation.swift
+@@ -251,6 +251,11 @@ extension StatusItemController {
+             return true
+         }
+ 
++        if UserDefaults.standard.bool(forKey: "ruRemainingLamp"),
++           self.applyRemainingLamp(provider: self.primaryProviderForUnifiedIcon(), button: button)
++        {
++            return false
++        }
+         let style = self.store.iconStyle
+         let showUsed = self.settings.usageBarsShowUsed
+         let showBrandPercent = self.settings.menuBarShowsBrandIconWithPercent
+@@ -480,6 +485,11 @@ extension StatusItemController {
+     @discardableResult
+     func applyIcon(for provider: UsageProvider, phase: Double?) -> Bool {
+         guard let button = self.statusItems[provider.instanceID]?.button else { return false }
++        if UserDefaults.standard.bool(forKey: "ruRemainingLamp"),
++           self.applyRemainingLamp(provider: provider, button: button)
++        {
++            return false
++        }
+         let snapshot = self.store.menuBarSnapshot(for: provider.instanceID)
+         // IconRenderer treats these values as a left-to-right "progress fill" percentage; depending on the
+         // user setting we pass either "percent left" or "percent used".
+diff --git a/Sources/CodexBar/StatusItemController+RemainingLamp.swift b/Sources/CodexBar/StatusItemController+RemainingLamp.swift
+new file mode 100644
+index 0000000..bc83494
+--- /dev/null
++++ b/Sources/CodexBar/StatusItemController+RemainingLamp.swift
+@@ -0,0 +1,57 @@
++import AppKit
++import CodexBarCore
++
++extension StatusItemController {
++    func applyRemainingLamp(provider: UsageProvider, button: NSStatusBarButton) -> Bool {
++        let snapshot = self.store.menuBarSnapshot(for: provider.instanceID)
++        // Codex must use the account's explicit seven-day lane, never a scoped model lane.
++        let window = provider == .codex
++            ? RemainingLamp.weekly(primary: snapshot?.primary, secondary: snapshot?.secondary)
++            : self.menuBarMetricWindow(for: provider, snapshot: snapshot)
++        let stale = self.store.isStale(provider: provider) || RemainingLamp.isExpired(updatedAt: snapshot?.updatedAt)
++        let percent = RemainingLamp.percent(window: window, stale: stale)
++        let color: NSColor = switch RemainingLamp.level(percent: percent) {
++        case .green: .systemGreen
++        case .yellow: .systemYellow
++        case .red: .systemRed
++        case .unknown: .systemGray
++        }
++        let image = NSImage(size: NSSize(width: 12, height: 18), flipped: false) { _ in
++            color.setFill()
++            NSBezierPath(ovalIn: NSRect(x: 2, y: 5, width: 8, height: 8)).fill()
++            return true
++        }
++        image.isTemplate = false
++        button.image = image
++        button.imagePosition = .imageLeft
++        button.title = percent.map { " \(Int($0.rounded()))%" } ?? " —"
++        button.toolTip = nil
++        return true
++    }
++}
++
++enum RemainingLamp {
++    enum Level { case green, yellow, red, unknown }
++
++    static func isExpired(updatedAt: Date?, now: Date = .init()) -> Bool {
++        guard let updatedAt else { return true }
++        let age = now.timeIntervalSince(updatedAt)
++        return age > 300 || age < -60
++    }
++
++    static func weekly(primary: RateWindow?, secondary: RateWindow?) -> RateWindow? {
++        [primary, secondary].compactMap(\.self).first { $0.windowMinutes == 10080 }
++    }
++
++    static func percent(window: RateWindow?, stale: Bool) -> Double? {
++        guard !stale, let window, !window.isSyntheticPlaceholder, window.usedPercent.isFinite else { return nil }
++        return min(100, max(0, 100 - window.usedPercent))
++    }
++
++    static func level(percent: Double?) -> Level {
++        guard let percent else { return .unknown }
++        if percent > 30 { return .green }
++        if percent >= 15 { return .yellow }
++        return .red
++    }
++}
+diff --git a/Tests/CodexBarTests/RemainingLampTests.swift b/Tests/CodexBarTests/RemainingLampTests.swift
+new file mode 100644
+index 0000000..29c87ba
+--- /dev/null
++++ b/Tests/CodexBarTests/RemainingLampTests.swift
+@@ -0,0 +1,26 @@
++import CodexBarCore
++import Foundation
++import Testing
++@testable import CodexBar
++
++struct RemainingLampTests {
++    @Test func thresholdsAndUnknown() {
++        #expect(RemainingLamp.level(percent: 31) == .green)
++        #expect(RemainingLamp.level(percent: 30) == .yellow)
++        #expect(RemainingLamp.level(percent: 15) == .yellow)
++        #expect(RemainingLamp.level(percent: 14) == .red)
++        #expect(RemainingLamp.level(percent: nil) == .unknown)
++        let weekly = RateWindow(usedPercent: 24, windowMinutes: 10080, resetsAt: nil, resetDescription: nil)
++        let short = RateWindow(usedPercent: 95, windowMinutes: 300, resetsAt: nil, resetDescription: nil)
++        #expect(RemainingLamp.weekly(primary: short, secondary: weekly) == weekly)
++        #expect(RemainingLamp.weekly(primary: weekly, secondary: short) == weekly)
++        #expect(RemainingLamp.weekly(primary: short, secondary: nil) == nil)
++        #expect(RemainingLamp.percent(window: weekly, stale: false) == 76)
++        #expect(RemainingLamp.percent(window: weekly, stale: true) == nil)
++        #expect(RemainingLamp.percent(window: nil, stale: false) == nil)
++        let now = Date(timeIntervalSince1970: 1000)
++        #expect(!RemainingLamp.isExpired(updatedAt: now.addingTimeInterval(-60), now: now))
++        #expect(RemainingLamp.isExpired(updatedAt: now.addingTimeInterval(-301), now: now))
++        #expect(RemainingLamp.isExpired(updatedAt: nil, now: now))
++    }
++}
