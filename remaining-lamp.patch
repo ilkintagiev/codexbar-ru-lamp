@@ -100,7 +100,7 @@ index 2ac82fb..8266aea 100644
      }
 diff --git a/Sources/CodexBar/GuardedRUUpdater.swift b/Sources/CodexBar/GuardedRUUpdater.swift
 new file mode 100644
-index 0000000..4c1e9f2
+index 0000000..557517d
 --- /dev/null
 +++ b/Sources/CodexBar/GuardedRUUpdater.swift
 @@ -0,0 +1,124 @@
@@ -209,8 +209,8 @@ index 0000000..4c1e9f2
 +                    let alert = NSAlert()
 +                    alert.messageText = code == 0 ? "Проверка обновлений завершена" : "Обновление недоступно"
 +                    alert.informativeText = code == 0
-+                        ? "Рабочая версия сохранена. Новая стабильная версия устанавливается только после сборки и проверок."
-+                        : "Текущая версия продолжает работать. Сведения: ~/Library/Caches/local.mark.codexbar-ru-updater/update-status.json."
++                        ? "Стабильная версия устанавливается после сборки и проверок."
++                        : "Текущая версия продолжает работать. Статус проверки сохранён."
 +                    alert.runModal()
 +                }
 +            }
