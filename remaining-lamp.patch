@@ -103,6 +103,58 @@ index 0000000..cce1ee2
 + p=pathlib.Path(d)/'preflight.swift'
 + p.write_text('import Foundation\n'+body+'\nlet paths: [String] = '+paths+'\n'+checks)
 + subprocess.run(['swift',str(p)],check=True,timeout=30)
+diff --git a/Scripts/ru_picker_layout_probe.swift b/Scripts/ru_picker_layout_probe.swift
+new file mode 100644
+index 0000000..66858b0
+--- /dev/null
++++ b/Scripts/ru_picker_layout_probe.swift
+@@ -0,0 +1,46 @@
++import AppKit
++import SwiftUI
++
++enum CostHistoryChartMenuView {
++    enum ChartMetric: Hashable { case tokens, cost; var title: String {
++        self == .tokens ? "Token" : "Cost"
++    } }
++}
++
++func L(_ key: String) -> String { key }
++
++@main struct PickerLayoutProbe {
++    @MainActor static func main() {
++        NSApplication.shared.setActivationPolicy(.prohibited)
++        var selected = CostHistoryChartMenuView.ChartMetric.tokens
++        for width in [CGFloat(296), CGFloat(360)] {
++            let binding = Binding(get: { selected }, set: { selected = $0 })
++            let root = HStack {
++                Spacer(minLength: 0)
++                CostHistoryMetricPicker(metrics: [.tokens, .cost], selection: binding)
++                    .fixedSize()
++                    .frame(width: 132, height: 22, alignment: .trailing)
++            }.frame(height: 22).padding(.horizontal, 16).frame(width: width)
++            let hosting = NSHostingView(rootView: root)
++            hosting.appearance = NSAppearance(named: .aqua)
++            hosting.frame = NSRect(x: 0, y: 0, width: width, height: 1)
++            hosting.layoutSubtreeIfNeeded()
++            hosting.frame = NSRect(origin: .zero, size: hosting.fittingSize)
++            hosting.layoutSubtreeIfNeeded()
++            func descendant(_ view: NSView) -> NSSegmentedControl? {
++                if let control = view as? NSSegmentedControl { return control }
++                for child in view.subviews {
++                    if let found = descendant(child) { return found }
++                }
++                return nil
++            }
++            guard let control = descendant(hosting) else { fatalError("missing native control") }
++            let actual = control.convert(control.bounds, to: hosting).maxX
++            precondition(abs(actual - (width - 16)) <= 1, "native edge mismatch")
++            control.selectedSegment = 1
++            _ = control.sendAction(control.action, to: control.target)
++            precondition(selected == .cost, "metric binding failed")
++        }
++        print("Native offscreen picker edges296/360 + real selection callback PASS")
++    }
++}
 diff --git a/Sources/CodexBar/CodexbarApp.swift b/Sources/CodexBar/CodexbarApp.swift
 index 2ac82fb..8266aea 100644
 --- a/Sources/CodexBar/CodexbarApp.swift
@@ -117,6 +169,89 @@ index 2ac82fb..8266aea 100644
      guard bundleURL.pathExtension == "app" else {
          return DisabledUpdaterController(unavailableReason: "Updates unavailable in this build.")
      }
+diff --git a/Sources/CodexBar/CostHistoryChartMenuView.swift b/Sources/CodexBar/CostHistoryChartMenuView.swift
+index 08789ca..e8074e9 100644
+--- a/Sources/CodexBar/CostHistoryChartMenuView.swift
++++ b/Sources/CodexBar/CostHistoryChartMenuView.swift
+@@ -239,16 +239,13 @@ struct CostHistoryChartMenuView: View {
+                         }
+                         Spacer(minLength: 0)
+                         if availableMetrics.count > 1 {
+-                            Picker(L("Display mode"), selection: self.$metric) {
+-                                ForEach(availableMetrics, id: \.self) { metric in
+-                                    Text(metric.title).tag(metric)
+-                                }
+-                            }
+-                            .pickerStyle(.segmented)
+-                            .controlSize(.small)
+-                            .labelsHidden()
+-                            .frame(width: Self.metricPickerWidth, height: Self.metricPickerHeight, alignment: .trailing)
+-                            .accessibilityLabel(L("Display mode"))
++                            CostHistoryMetricPicker(metrics: availableMetrics, selection: self.$metric)
++                                .fixedSize()
++                                .frame(
++                                    width: Self.metricPickerWidth,
++                                    height: Self.metricPickerHeight,
++                                    alignment: .trailing)
++                                .accessibilityLabel(L("Display mode"))
+                         }
+                     }
+                     .frame(height: Self.metricPickerHeight)
+diff --git a/Sources/CodexBar/CostHistoryMetricPicker.swift b/Sources/CodexBar/CostHistoryMetricPicker.swift
+new file mode 100644
+index 0000000..cc96a54
+--- /dev/null
++++ b/Sources/CodexBar/CostHistoryMetricPicker.swift
+@@ -0,0 +1,49 @@
++import AppKit
++import SwiftUI
++
++/// AppKit bounds, rather than runtime-specific SwiftUI alignment insets, anchor the chart control.
++@MainActor
++struct CostHistoryMetricPicker: NSViewRepresentable {
++    let metrics: [CostHistoryChartMenuView.ChartMetric]
++    @Binding var selection: CostHistoryChartMenuView.ChartMetric
++
++    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
++
++    func makeNSView(context: Context) -> NSSegmentedControl {
++        let control = BoundsAlignedMetricControl()
++        control.segmentStyle = .rounded
++        control.controlSize = .small
++        control.target = context.coordinator
++        control.action = #selector(Coordinator.selected(_:))
++        control.setAccessibilityLabel(L("Display mode"))
++        self.updateNSView(control, context: context)
++        return control
++    }
++
++    func updateNSView(_ control: NSSegmentedControl, context: Context) {
++        context.coordinator.parent = self
++        control.segmentCount = self.metrics.count
++        for (index, metric) in self.metrics.enumerated() {
++            control.setLabel(metric.title, forSegment: index)
++            control.setWidth(0, forSegment: index)
++        }
++        control.selectedSegment = self.metrics.firstIndex(of: self.selection) ?? -1
++    }
++
++    @MainActor
++    final class Coordinator: NSObject {
++        var parent: CostHistoryMetricPicker
++        init(parent: CostHistoryMetricPicker) { self.parent = parent }
++        @objc func selected(_ control: NSSegmentedControl) {
++            guard self.parent.metrics.indices.contains(control.selectedSegment) else { return }
++            self.parent.selection = self.parent.metrics[control.selectedSegment]
++        }
++    }
++}
++
++@MainActor
++private final class BoundsAlignedMetricControl: NSSegmentedControl {
++    override var alignmentRectInsets: NSEdgeInsets {
++        NSEdgeInsets()
++    }
++}
 diff --git a/Sources/CodexBar/GuardedRUUpdater.swift b/Sources/CodexBar/GuardedRUUpdater.swift
 new file mode 100644
 index 0000000..557517d
