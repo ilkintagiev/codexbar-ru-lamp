@@ -1,5 +1,5 @@
 diff --git a/Sources/CodexBar/StatusItemController+Animation.swift b/Sources/CodexBar/StatusItemController+Animation.swift
-index ba9dce7..ac3da02 100644
+index ba9dce7..c9588b9 100644
 --- a/Sources/CodexBar/StatusItemController+Animation.swift
 +++ b/Sources/CodexBar/StatusItemController+Animation.swift
 @@ -251,6 +251,11 @@ extension StatusItemController {
@@ -14,7 +14,7 @@ index ba9dce7..ac3da02 100644
          let style = self.store.iconStyle
          let showUsed = self.settings.usageBarsShowUsed
          let showBrandPercent = self.settings.menuBarShowsBrandIconWithPercent
-@@ -480,6 +485,11 @@ extension StatusItemController {
+@@ -480,6 +485,15 @@ extension StatusItemController {
      @discardableResult
      func applyIcon(for provider: UsageProvider, phase: Double?) -> Bool {
          guard let button = self.statusItems[provider.instanceID]?.button else { return false }
@@ -23,6 +23,10 @@ index ba9dce7..ac3da02 100644
 +        {
 +            return false
 +        }
++        return self.applyNativeIcon(for: provider, phase: phase, button: button)
++    }
++
++    private func applyNativeIcon(for provider: UsageProvider, phase: Double?, button: NSStatusBarButton) -> Bool {
          let snapshot = self.store.menuBarSnapshot(for: provider.instanceID)
          // IconRenderer treats these values as a left-to-right "progress fill" percentage; depending on the
          // user setting we pass either "percent left" or "percent used".
@@ -89,6 +93,20 @@ index 0000000..bc83494
 +        return .red
 +    }
 +}
+diff --git a/Sources/CodexBarCore/Providers/TypeSafe/TypeSafeWebFetchStrategy.swift b/Sources/CodexBarCore/Providers/TypeSafe/TypeSafeWebFetchStrategy.swift
+index 2651101..572d704 100644
+--- a/Sources/CodexBarCore/Providers/TypeSafe/TypeSafeWebFetchStrategy.swift
++++ b/Sources/CodexBarCore/Providers/TypeSafe/TypeSafeWebFetchStrategy.swift
+@@ -172,7 +172,8 @@ enum TypeSafeCredentialError: LocalizedError, Equatable {
+     var errorDescription: String? {
+         switch self {
+         case .missingCookie:
+-            "No TypeSafe session cookies found. Sign in at console.typesafe.ai/settings/billing or paste a Cookie header."
++            "No TypeSafe session cookies found. Sign in at console.typesafe.ai/settings/billing "
++                + "or paste a Cookie header."
+         case .invalidCookie:
+             "TypeSafe needs a nonempty Cookie header from the billing page."
+         case .disabled:
 diff --git a/Tests/CodexBarTests/RemainingLampTests.swift b/Tests/CodexBarTests/RemainingLampTests.swift
 new file mode 100644
 index 0000000..29c87ba
