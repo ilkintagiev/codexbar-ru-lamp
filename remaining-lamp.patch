@@ -84,6 +84,25 @@ index 0000000..f8ed1cf
 + Path('build-manifest.json').write_text(json.dumps(manifest,sort_keys=True))
 +else:
 + resources=Path(a.resources);resources.mkdir(parents=True,exist_ok=True);(resources/'ru-build.json').write_text(json.dumps(manifest,sort_keys=True))
+diff --git a/Scripts/ru_path_preflight.py b/Scripts/ru_path_preflight.py
+new file mode 100644
+index 0000000..cce1ee2
+--- /dev/null
++++ b/Scripts/ru_path_preflight.py
+@@ -0,0 +1,13 @@
++#!/usr/bin/env python3
++"""Bounded pure-Foundation compatibility oracle before expensive full compilation."""
++import pathlib, subprocess, tempfile
++root=pathlib.Path(__file__).resolve().parents[1]
++src=(root/'Sources/CodexBarCore/AgentSession.swift').read_text()
++body=src[src.index('enum AgentProcessPath {'):src.index('public struct AgentProcessRecord:')]
++tests=(root/'Tests/CodexBarTests/AgentProcessBasenameTests.swift').read_text()
++paths=tests[tests.index('@Test(arguments: [')+len('@Test(arguments: '):tests.index('])\n    func')+1]
++checks='\nfor (index, path) in paths.enumerated() {\n if AgentProcessPath.basename(path) != URL(fileURLWithPath: path).lastPathComponent {\n  print("FAIL Foundation compatibility synthetic case \\(index)"); exit(1)\n }\n}\nvar reads = 0\nfunc directory() -> String { reads += 1; return "/synthetic/omp" }\nfor _ in 0..<2500 {\n if AgentProcessPath.basename("/synthetic/node/", currentDirectory: directory(), expandTilde: { _ in directory() }) != "node" { exit(1) }\n}\nif reads != 0 { exit(1) }\nif AgentProcessPath.basename("", currentDirectory: directory()) != "omp" { exit(1) }\nif AgentProcessPath.basename("..", currentDirectory: directory()) != "synthetic" { exit(1) }\nif AgentProcessPath.basename("~/", expandTilde: { _ in directory() }) != "omp" || reads != 3 { exit(1) }\nlet cases = [\n ("~", "~", "home"), ("~/", "home", "home"), ("~root", "~root", "root"),\n ("~root/", "~root", "root"), ("~root/..", "omp", ".."), ("~/pi/..", "..", ".."),\n ("~unknown/..", "omp", "omp"), ("foo/../~", "~", "~"),\n]\nfor (path, modern, legacy) in cases {\n for expandsBare in [false, true] {\n  let name = AgentProcessPath.basename(path, currentDirectory: "/work/omp", expandTilde: { p in\n   if p == "~root" || p.hasPrefix("~root/") { return "/synthetic/root" + p.dropFirst(5) }\n   if p == "~" || p.hasPrefix("~/") { return "/synthetic/home" + p.dropFirst() }\n   return p\n  }, expandsBareTilde: expandsBare)\n  if name != (expandsBare ? legacy : modern) { print("FAIL injected dialect"); exit(1) }\n }\n}\nprint("Foundation41oracle cases + injected dialects + ordinary fastpath PASS")\n'
++with tempfile.TemporaryDirectory(prefix='codexbar-path-preflight-') as d:
++ p=pathlib.Path(d)/'preflight.swift'
++ p.write_text('import Foundation\n'+body+'\nlet paths: [String] = '+paths+'\n'+checks)
++ subprocess.run(['swift',str(p)],check=True,timeout=30)
 diff --git a/Sources/CodexBar/CodexbarApp.swift b/Sources/CodexBar/CodexbarApp.swift
 index 2ac82fb..8266aea 100644
 --- a/Sources/CodexBar/CodexbarApp.swift
@@ -505,6 +524,39 @@ index 0000000..bc83494
 +        return .red
 +    }
 +}
+diff --git a/Sources/CodexBarCore/AgentSession.swift b/Sources/CodexBarCore/AgentSession.swift
+index 1151d07..ac8a1ba 100644
+--- a/Sources/CodexBarCore/AgentSession.swift
++++ b/Sources/CodexBarCore/AgentSession.swift
+@@ -195,20 +195,26 @@ struct DirectoryMetadataScanBudget {
+ enum AgentProcessPath {
+     /// Foundation's tilde rules vary by runtime/SDK. An explicit directory hint avoids a metadata probe.
+     static let expandsBareTilde = URL(fileURLWithPath: "~", isDirectory: false).relativePath != "~"
++    static let expandsSlashTilde = URL(fileURLWithPath: "~/", isDirectory: false).relativePath.hasPrefix("/")
++    static let resolvesEmptyDotComponents = URL(fileURLWithPath: "a//..", isDirectory: false).lastPathComponent != "a"
+ 
+     static func basename(
+         _ path: String,
+         currentDirectory: @autoclosure () -> String = FileManager.default.currentDirectoryPath,
+-        expandTilde: (String) -> String = { ($0 as NSString).expandingTildeInPath },
++        expandTilde: ((String) -> String)? = nil,
+         expandsBareTilde: Bool = Self.expandsBareTilde) -> String
+     {
+-        let path = path.hasPrefix("~") && (expandsBareTilde || path.hasPrefix("~/")) ? expandTilde(path) : path
++        let expandsSlash = expandTilde != nil || Self.expandsSlashTilde
++        let shouldExpand = path.hasPrefix("~") && (expandsBareTilde || (path.hasPrefix("~/") && expandsSlash))
++        let expansion = expandTilde ?? { ($0 as NSString).expandingTildeInPath }
++        let path = shouldExpand ? expansion(path) : path
+         let basename = (path as NSString).lastPathComponent
+         if path.hasPrefix("/") { return basename }
+         guard basename.isEmpty || basename == "." || basename == ".." else { return basename }
+         // File URLs resolve relative dot components against CWD, but leave absolute ones alone.
+         var components = currentDirectory().components(separatedBy: "/")
+         for component in path.components(separatedBy: "/") {
++            if component.isEmpty, Self.resolvesEmptyDotComponents { continue }
+             if component == ".." {
+                 if components.count > 1 { components.removeLast() }
+             } else if component != "." {
 diff --git a/Sources/CodexBarCore/Providers/TypeSafe/TypeSafeWebFetchStrategy.swift b/Sources/CodexBarCore/Providers/TypeSafe/TypeSafeWebFetchStrategy.swift
 index 2651101..572d704 100644
 --- a/Sources/CodexBarCore/Providers/TypeSafe/TypeSafeWebFetchStrategy.swift
@@ -519,6 +571,27 @@ index 2651101..572d704 100644
          case .invalidCookie:
              "TypeSafe needs a nonempty Cookie header from the billing page."
          case .disabled:
+diff --git a/Tests/CodexBarTests/AgentProcessBasenameTests.swift b/Tests/CodexBarTests/AgentProcessBasenameTests.swift
+index 2f7df41..d0f53df 100644
+--- a/Tests/CodexBarTests/AgentProcessBasenameTests.swift
++++ b/Tests/CodexBarTests/AgentProcessBasenameTests.swift
+@@ -89,9 +89,13 @@ struct AgentProcessBasenameTests {
+         let start = try #require(source.range(of: "enum AgentProcessPath {"))
+         let end = try #require(source.range(of: "public enum LSOFCWDOutputParser {"))
+         let parser = String(source[start.lowerBound..<end.lowerBound])
+-        let hintedProbe = "URL(fileURLWithPath: \"~\", isDirectory: false)"
+-        #expect(parser.components(separatedBy: hintedProbe).count - 1 == 1)
+-        #expect(parser.replacingOccurrences(of: hintedProbe, with: "").contains("URL(fileURLWithPath:") == false)
++        let hintedProbes = ["~", "~/", "a//.."].map { "URL(fileURLWithPath: \"\($0)\", isDirectory: false)" }
++        var withoutProbes = parser
++        for probe in hintedProbes {
++            #expect(parser.components(separatedBy: probe).count - 1 == 1)
++            withoutProbes = withoutProbes.replacingOccurrences(of: probe, with: "")
++        }
++        #expect(withoutProbes.contains("URL(fileURLWithPath:") == false)
+         #expect(!parser.contains("fileExists"))
+         #expect(!parser.contains("attributesOfItem"))
+         #expect(!parser.contains("lstat("))
 diff --git a/Tests/CodexBarTests/RemainingLampTests.swift b/Tests/CodexBarTests/RemainingLampTests.swift
 new file mode 100644
 index 0000000..29c87ba
