@@ -1,3 +1,49 @@
+diff --git a/Scripts/ru_agent_fixture_preflight.py b/Scripts/ru_agent_fixture_preflight.py
+new file mode 100644
+index 0000000..85b7192
+--- /dev/null
++++ b/Scripts/ru_agent_fixture_preflight.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++"""Exercise the actual synthetic test fixture without a copied platform executable."""
++import ctypes
++import pathlib
++import re
++import select
++import subprocess
++import tempfile
++
++source_test = pathlib.Path('Tests/CodexBarTests/DarwinProcessEnumeratorTests.swift').read_text()
++match = re.search(r'try """\n(.*?)\n        """\.write\(to: source', source_test, re.S)
++if not match:
++    raise SystemExit('Missing actual echo fixture source')
++with tempfile.TemporaryDirectory(prefix='codexbar-agent-fixture-') as directory:
++    root = pathlib.Path(directory)
++    source = root / 'fixture.c'
++    source.write_text(match.group(1))
++    executable = root / 'claude'
++    subprocess.run(['/usr/bin/xcrun', 'clang', str(source), '-o', str(executable)], check=True, timeout=20)
++    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(executable)], check=True, timeout=10)
++    process = subprocess.Popen([str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env={})
++    try:
++        process.stdin.write(b'ready\n')
++        process.stdin.flush()
++        if not select.select([process.stdout], [], [], 5)[0] or process.stdout.read(6) != b'ready\n':
++            raise RuntimeError('Fixture failed readiness handshake')
++        libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
++        buffer = ctypes.create_string_buffer(4096)
++        if libproc.proc_pidpath(process.pid, buffer, len(buffer)) <= 0:
++            raise RuntimeError('Running fixture has no executable path')
++        executable.unlink()
++        if libproc.proc_pidpath(process.pid, buffer, len(buffer)) != 0:
++            raise RuntimeError('Unlinked fixture unexpectedly retains executable path')
++        if process.poll() is not None:
++            raise RuntimeError('Fixture exited after unlink')
++    finally:
++        if process.poll() is None:
++            process.terminate()
++        process.wait(timeout=5)
++print('PASS actual echo fixture readiness/running/unlinked path semantics')
 diff --git a/Scripts/ru_channel_tests.py b/Scripts/ru_channel_tests.py
 new file mode 100644
 index 0000000..9182edc
@@ -727,6 +773,44 @@ index 2f7df41..d0f53df 100644
          #expect(!parser.contains("fileExists"))
          #expect(!parser.contains("attributesOfItem"))
          #expect(!parser.contains("lstat("))
+diff --git a/Tests/CodexBarTests/DarwinProcessEnumeratorTests.swift b/Tests/CodexBarTests/DarwinProcessEnumeratorTests.swift
+index 1cf93cb..82d64a6 100644
+--- a/Tests/CodexBarTests/DarwinProcessEnumeratorTests.swift
++++ b/Tests/CodexBarTests/DarwinProcessEnumeratorTests.swift
+@@ -210,9 +210,30 @@ struct DarwinProcessEnumeratorTests {
+         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+         defer { try? FileManager.default.removeItem(at: root) }
+         let executable = root.appendingPathComponent("claude")
+-        try Data(contentsOf: URL(fileURLWithPath: "/bin/cat")).write(to: executable)
+-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+-        // Relocated platform binaries need a new signature; ad-hoc signing never accesses a signing key.
++        let source = root.appendingPathComponent("fixture.c")
++        // Build our own echo fixture: relocating a signed platform cat can be killed at launch.
++        try """
++        #include <unistd.h>
++        int main(void) {
++            char buffer[1024]; ssize_t count;
++            while ((count = read(0, buffer, sizeof buffer)) > 0) {
++                ssize_t offset = 0;
++                while (offset < count) {
++                    ssize_t written = write(1, buffer + offset, count - offset);
++                    if (written < 1) return 1;
++                    offset += written;
++                }
++            }
++            return count < 0;
++        }
++        """.write(to: source, atomically: true, encoding: .utf8)
++        _ = try await SubprocessRunner.run(
++            binary: "/usr/bin/xcrun",
++            arguments: ["clang", source.path, "-o", executable.path],
++            environment: ProcessInfo.processInfo.environment,
++            timeout: 20,
++            label: "synthetic-agent-compilation")
++        // Ad-hoc signing never accesses a signing key.
+         _ = try await SubprocessRunner.run(
+             binary: "/usr/bin/codesign",
+             arguments: ["--force", "--sign", "-", executable.path],
 diff --git a/Tests/CodexBarTests/RemainingLampTests.swift b/Tests/CodexBarTests/RemainingLampTests.swift
 new file mode 100644
 index 0000000..29c87ba
