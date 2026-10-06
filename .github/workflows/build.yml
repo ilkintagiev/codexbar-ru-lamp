@@ -64,6 +64,9 @@ jobs:
       - name: Required source checks
         working-directory: upstream
         run: make check
+      - name: Focused renderer lamp and process tests
+        working-directory: upstream
+        run: swift test --no-parallel --filter "(^CodexBarTests\.MenuBarLayoutRendererTests/|^CodexBarTests\.RemainingLampTests/|^CodexBarTests\.DarwinProcessEnumeratorTests/)"
       - name: Required tests
         working-directory: upstream
         run: make test
