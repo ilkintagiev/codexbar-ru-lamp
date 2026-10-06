@@ -428,6 +428,62 @@ index 0000000..557517d
 +        }
 +    }
 +}
+diff --git a/Sources/CodexBar/MenuBarLayoutRenderer.swift b/Sources/CodexBar/MenuBarLayoutRenderer.swift
+index 5c6130c..a1f9824 100644
+--- a/Sources/CodexBar/MenuBarLayoutRenderer.swift
++++ b/Sources/CodexBar/MenuBarLayoutRenderer.swift
+@@ -278,7 +278,15 @@ final class MenuBarLayoutRenderer {
+         let attributes: [NSAttributedString.Key: Any]
+     }
+ 
++    private struct LastRender {
++        let layout: MenuBarLayout
++        let data: MenuBarLayoutRenderData
++        let options: MenuBarLayoutRenderOptions
++        let output: MenuBarLayoutRenderedTitle
++    }
++
+     private let cache: MenuBarLayoutTitleCache
++    private var lastRender: LastRender?
+ 
+     init(cache: MenuBarLayoutTitleCache = MenuBarLayoutTitleCache()) {
+         self.cache = cache
+@@ -291,6 +299,13 @@ final class MenuBarLayoutRenderer {
+         options: MenuBarLayoutRenderOptions)
+         -> MenuBarLayoutRenderedTitle
+     {
++        // Exact inputs, including the clock, cannot change reset text or conditional outcomes.
++        // Avoid rebuilding and hashing the broad key on repeated animation ticks with identical inputs.
++        if let lastRender = self.lastRender, self.cache.count > 0,
++           lastRender.layout == layout, lastRender.data == data, lastRender.options == options
++        {
++            return lastRender.output
++        }
+         let resetWindows = Set(layout.flattenedTokens(conditionals: options.conditionals).compactMap(\.resetWindow))
+         let resetText = PercentWindow.allCases
+             .filter { $0 == .automatic || resetWindows.contains($0) }
+@@ -317,7 +332,7 @@ final class MenuBarLayoutRenderer {
+             forceStackedStyle: options.forceStackedStyle,
+             resetText: resetText,
+             conditionalOutcomes: outcomes)
+-        return self.cache.value(for: key) {
++        let output = self.cache.value(for: key) {
+             Self.renderUncached(
+                 layout: layout,
+                 data: data,
+@@ -325,9 +340,12 @@ final class MenuBarLayoutRenderer {
+                 options: options,
+                 outcomes: outcomes)
+         }
++        self.lastRender = LastRender(layout: layout, data: data, options: options, output: output)
++        return output
+     }
+ 
+     func removeAll() {
++        self.lastRender = nil
+         self.cache.removeAll()
+     }
+ 
 diff --git a/Sources/CodexBar/Resources/cloud_update.py b/Sources/CodexBar/Resources/cloud_update.py
 new file mode 100644
 index 0000000..9952501
